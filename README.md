@@ -1,185 +1,206 @@
-# GRE Tunnel Optimizer (Safe + Performance + Persistent)
+# NetSpire — GRE Tunnel Optimizer (Safe + Performance + Persistent)
 
-A single-file Bash script to create and optimize a GRE tunnel between two Linux servers (e.g., IRAN ↔ FOREIGN) with:
+NetSpire is a **single-file Bash** installer that provisions and tunes a **GRE (protocol 47) tunnel** between two Linux servers (e.g., **IRAN ↔ FOREIGN**) with a focus on **safety**, **throughput**, and **reboot persistence**.
 
-- MTU auto-detection
-- MSS clamping (PMTU + fixed)
-- Optional NAT
-- Optional policy routing (safe alternative to changing default route)
-- systemd persistence (auto-restore on reboot)
-- Non-destructive firewall behavior (NO iptables flush)
+**Key features**
 
-> ⚠️ Important:
+- Automatic **WAN interface** + **MTU** detection
+- **MSS clamping** (PMTU + fixed MSS on tunnel egress)
+- Optional **NAT (MASQUERADE)**
+- Optional **policy routing** (safe alternative to changing default route)
+- **systemd persistence** (auto-restore after reboot)
+- **Non-destructive firewall behavior** (**NO iptables flush**)
+
+> ⚠️ Important
 >
-> - GRE is **protocol 47**. Many providers/ISPs block or rate-limit GRE.
-> - GRE is **NOT encrypted**. For confidentiality, use IPsec/WireGuard.
+> - GRE is **protocol 47**. Some providers/ISPs **block or rate-limit GRE**.
+> - GRE is **NOT encrypted**. For confidentiality/integrity, use **GRE over IPsec** or **WireGuard**.
 
-## Why this repo exists
+## Why NetSpire
 
-Many GRE scripts on the internet:
+A lot of GRE scripts found online are risky or brittle:
 
-- use public IP ranges inside the tunnel (bad practice),
-- flush all iptables rules (high risk: locks you out),
-- add default route via tunnel blindly (breaks SSH),
-- persist using distro-specific tools (fails on other distros).
+- Use **public IP ranges** inside the tunnel (bad practice).
+- **Flush iptables** (locks you out / breaks host firewall).
+- Blindly set **default route** via tunnel (breaks SSH/network).
+- Persist using **distro-specific** networking tools (fails across environments).
 
-This script is designed to be:
+NetSpire is built to be:
 
-- **safe-by-default**
-- **idempotent**
-- **portable across systemd Linux distros**
+- **Safe-by-default**
+- **Idempotent** (re-run without stacking destructive changes)
+- **Portable on systemd-based Linux distros**
 
 ## Requirements
 
-- Linux server with root access
-- Packages:
+- Linux server with **root** access
+- Packages (NetSpire attempts best-effort installation on common distros):
   - `iproute2` (ip/tunnel)
   - `iptables`
   - `ping`
   - Optional: `tc` (for fq_codel), `ethtool`
-- `systemd` is required for persistence; without systemd, tunnel still comes up but won't auto-restore after reboot.
+- `systemd` is required for persistence (without it, the tunnel can still come up, but won’t auto-restore after reboot).
 
 ## Quick Start
 
-### 1) Clone and run
+### 1) Recommended: One-liner install & run (curl)
+
+Run on **both** servers (IRAN and FOREIGN):
 
 ```bash
-git clone https://github.com/<your-username>/gre-tunnel-optimizer.git
-cd gre-tunnel-optimizer
-chmod +x gre-tunnel.sh
-sudo ./gre-tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/power0matin/NetSpire/main/netspire.sh)
 ```
 
-### 2) Run on BOTH servers
+### 2) Alternative: Clone & run
 
-- On IRAN server: choose role **IRAN**
-- On FOREIGN server: choose role **FOREIGN**
-  Use the correct public IPv4 addresses for each side.
+```bash
+git clone https://github.com/power0matin/NetSpire.git
+cd NetSpire
+chmod +x netspire.sh
+sudo ./netspire.sh
+```
 
-## What it configures
+### 3) Run on BOTH servers
 
-### Tunnel addressing
+- On the IRAN server: choose role **IRAN**
+- On the FOREIGN server: choose role **FOREIGN**
+- Provide correct **public IPv4** for both ends
 
-- Uses RFC1918 by default:
-  - FOREIGN: `10.10.10.1/30`
-  - IRAN: `10.10.10.2/30`
+## What NetSpire Configures
 
+### Tunnel addressing (RFC1918 by default)
+
+NetSpire uses private addressing on the tunnel:
+
+- FOREIGN: `10.10.10.1/30`
+- IRAN: `10.10.10.2/30`
 - Network: `10.10.10.0/30`
 
-You can change it via environment variables:
+Override if needed:
 
 ```bash
-sudo TUN_NET_CIDR="10.20.30.0/30" ./gre-tunnel.sh
+sudo TUN_NET_CIDR="10.20.30.0/30" ./netspire.sh
 ```
 
-### MTU optimization
+## MTU Optimization
 
-- Detects WAN MTU from the default route interface
-- Tunnel MTU = WAN MTU - 24 bytes (IPv4 + GRE overhead)
-- If MTU looks suspiciously low, it falls back to `1400`
+NetSpire detects MTU from the default route interface and applies:
 
-### MSS clamping
+- `tunnel_mtu = wan_mtu - 24` (IPv4 + GRE overhead)
+- If computed MTU is suspiciously low, it falls back to `1400`
 
-To avoid fragmentation and poor TCP performance:
+Why it matters: wrong MTU causes fragmentation, retransmissions, and major TCP throughput loss.
+
+## MSS Clamping (Critical for GRE)
+
+To prevent TCP fragmentation issues across the GRE overhead:
 
 - Adds `TCPMSS --clamp-mss-to-pmtu`
-- Adds explicit `TCPMSS --set-mss (MTU-40)` on tunnel egress
+- Adds explicit `TCPMSS --set-mss (MTU-40)` for tunnel egress
 
-You can change mode:
+Modes:
 
-- `pmtu` (only clamp)
-- `fixed` (only fixed mss)
-- `both` (default)
+- `pmtu` → clamp only
+- `fixed` → fixed MSS only
+- `both` → default (recommended)
 
 ```bash
-sudo CLAMP_MSS_MODE=pmtu ./gre-tunnel.sh
+sudo CLAMP_MSS_MODE=pmtu ./netspire.sh
 ```
 
-### sysctl performance tuning
+## sysctl Performance Tuning
 
-Creates/updates:
+NetSpire writes a drop-in sysctl profile:
 
 - `/etc/sysctl.d/99-gre-tunnel.conf`
 
 Includes:
 
-- IP forwarding
-- Larger socket buffers
-- Better backlogs
-- MTU probing
-- Optional BBR (if available)
+- `net.ipv4.ip_forward = 1`
+- Larger socket buffers (rmem/wmem)
+- Improved backlogs (somaxconn, netdev_max_backlog)
+- `tcp_mtu_probing = 1`
+- Optional **BBR** (enabled if kernel supports it)
 
-### qdisc (optional)
+## Queue Discipline (Optional)
 
-Applies `fq_codel` to the tunnel interface if `tc` is available.
+If `tc` is available, NetSpire applies `fq_codel` on the tunnel interface (helps with latency under load).
 
 Disable:
 
 ```bash
-sudo ENABLE_FQ_CODEL=0 ./gre-tunnel.sh
+sudo ENABLE_FQ_CODEL=0 ./netspire.sh
 ```
 
 ## NAT (Optional)
 
-On many setups, you want **NAT on the FOREIGN server** so traffic from IRAN egresses via FOREIGN.
+Common setup: enable NAT on the **FOREIGN** server so traffic from IRAN can egress via FOREIGN.
 
-During interactive run, FOREIGN role is prompted:
-
-- Enable NAT: `MASQUERADE` out of WAN interface.
-
-Or set via env:
+Interactive prompt appears when role = FOREIGN, or set via env:
 
 ```bash
-sudo ENABLE_NAT=1 NAT_OUT_IFACE=eth0 ./gre-tunnel.sh
+sudo ENABLE_NAT=1 NAT_OUT_IFACE=eth0 ./netspire.sh
 ```
+
+If `NAT_OUT_IFACE` is not provided, NetSpire uses the detected WAN interface.
 
 ## Routing Modes
 
 ### 1) Policy Routing (Recommended)
 
-Instead of changing your system default route (which often breaks SSH), you can route only specific destinations via tunnel.
+Instead of changing the system default route (which often breaks SSH), route only specific destinations via the tunnel using a fwmark + separate routing table.
 
-Example: Route **all** traffic via tunnel safely (only from this host, not forwarded unless you add PREROUTING rules):
-
-```bash
-sudo ENABLE_POLICY_ROUTE=1 POLICY_DST_CIDR="0.0.0.0/0" ./gre-tunnel.sh
-```
-
-Or only route a specific subnet:
+Route **all** destinations via tunnel (host-originated traffic only):
 
 ```bash
-sudo ENABLE_POLICY_ROUTE=1 POLICY_DST_CIDR="203.0.113.0/24" ./gre-tunnel.sh
+sudo ENABLE_POLICY_ROUTE=1 POLICY_DST_CIDR="0.0.0.0/0" ./netspire.sh
 ```
+
+Route only a specific subnet:
+
+```bash
+sudo ENABLE_POLICY_ROUTE=1 POLICY_DST_CIDR="203.0.113.0/24" ./netspire.sh
+```
+
+Notes:
+
+- NetSpire marks traffic in `mangle OUTPUT` (locally generated traffic).
+- If you need to route forwarded traffic, you’ll typically add marking in `mangle PREROUTING` (advanced use).
 
 ### 2) Default Route via Tunnel (UNSAFE)
 
-Not recommended. Can break connectivity if misused.
-Interactive prompt exists, or:
+Not recommended; can break connectivity if misused.
 
 ```bash
-sudo ENABLE_UNSAFE_DEFAULT_ROUTE=1 ./gre-tunnel.sh
+sudo ENABLE_UNSAFE_DEFAULT_ROUTE=1 ./netspire.sh
 ```
 
 ## Persistence (systemd)
 
-If systemd is present:
+If `systemd` is available, NetSpire persists configuration and auto-restores the tunnel on reboot.
 
-- Saves state: `/etc/gre-tunnel/<TUN_NAME>.env`
-- Installs service: `gre-tunnel-<TUN_NAME>.service`
-- Installs helper scripts:
+Created artifacts:
+
+- State file:
+  - `/etc/gre-tunnel/<TUN_NAME>.env`
+
+- systemd service:
+  - `gre-tunnel-<TUN_NAME>.service`
+
+- Helper scripts:
   - `/usr/local/sbin/gre-tunnel-<TUN_NAME>-apply`
   - `/usr/local/sbin/gre-tunnel-<TUN_NAME>-down`
 
-Service commands:
+Manage the service (default tunnel name is `gre-tun0`):
 
 ```bash
 sudo systemctl status gre-tunnel-gre-tun0.service
 sudo systemctl restart gre-tunnel-gre-tun0.service
 ```
 
-## Verification & Troubleshooting
+## Verification
 
-### Check the interface
+### Check tunnel interface
 
 ```bash
 ip a show gre-tun0
@@ -206,20 +227,22 @@ ping -c 3 -I gre-tun0 10.10.10.1
 ping -c 1 -I gre-tun0 -M do -s 1360 10.10.10.2
 ```
 
-### Check MSS rules
+### Confirm MSS rules
 
 ```bash
 iptables -t mangle -S | grep TCPMSS
 ```
 
-### If tunnel doesn't pass traffic
+## Troubleshooting
+
+### Tunnel interface exists but ping fails
 
 Most common causes:
 
 1. GRE blocked by provider/ISP (proto 47)
-2. Firewall default-drop without GRE allow
-3. NAT in the path (GRE often fails across NAT)
-4. ICMP blocked causing PMTU blackholes (keep PMTU rules / enable MTU probing)
+2. Host firewall default-drop blocks GRE/ICMP
+3. GRE across NAT (often fails without special handling)
+4. ICMP blocked causing PMTU blackholes
 
 Optional sniff (if available):
 
@@ -227,14 +250,34 @@ Optional sniff (if available):
 tcpdump -ni <WAN_IFACE> proto 47
 ```
 
-## Security note
+### Quick diagnostics checklist
 
-GRE provides **no encryption**. If you need confidentiality/integrity, use:
+- Confirm GRE allowed:
 
-- GRE over IPsec
-- or WireGuard
-- or OpenVPN
+  ```bash
+  iptables -S INPUT | grep -- "-p 47"
+  ```
+
+- Confirm endpoint reachability (public IP):
+
+  ```bash
+  ping -c 2 <REMOTE_PUBLIC_IP>
+  ```
+
+- Confirm tunnel counters increase:
+
+  ```bash
+  ip -s link show gre-tun0
+  ```
+
+## Security Note
+
+GRE provides **no encryption**. If you need confidentiality/integrity:
+
+- Use **GRE over IPsec**
+- or replace with **WireGuard**
+- or use **OpenVPN**
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT — see `LICENSE`.
